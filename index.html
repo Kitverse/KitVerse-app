@@ -145,10 +145,31 @@
   .cart-total .lbl { font-size: 13px; color: #ffffff; font-weight: 700; }
   .cart-total .val { font-size: 22px; font-weight: 800; }
   .cart-note { font-size: 11.5px; color: #ffffff; margin-bottom: 16px; }
+
+  .loading-spinner { position: fixed; inset: 0; background: rgba(6,11,22,.72); z-index: 999;
+    display: flex; align-items: center; justify-content: center;
+    max-width: 480px; margin: 0 auto; }
+  .ball-spin { animation: ball-spin-anim .7s linear infinite; }
+  @keyframes ball-spin-anim { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
 <div id="app"></div>
+<div id="loading-spinner" class="loading-spinner" style="display:none;">
+  <svg viewBox="0 0 24 24" width="46" height="46" class="ball-spin">
+    <circle cx="12" cy="12" r="10.3" fill="#ffffff" stroke="#0a1220" stroke-width="1.1"/>
+    <polygon points="12,6.6 15.3,9.2 14.1,13 9.9,13 8.7,9.2" fill="#1E6FFF"/>
+    <line x1="12" y1="6.6" x2="12" y2="2.4" stroke="#0a1220" stroke-width="1"/>
+    <line x1="15.3" y1="9.2" x2="19.2" y2="7.5" stroke="#0a1220" stroke-width="1"/>
+    <line x1="14.1" y1="13" x2="16.3" y2="17" stroke="#0a1220" stroke-width="1"/>
+    <line x1="9.9" y1="13" x2="7.7" y2="17" stroke="#0a1220" stroke-width="1"/>
+    <line x1="8.7" y1="9.2" x2="4.8" y2="7.5" stroke="#0a1220" stroke-width="1"/>
+  </svg>
+</div>
+
+<!-- Firebase: sustituye estas 2 líneas por las que te dé tu propio proyecto en Firebase Console si usan otra versión -->
+<script src="https://www.gstatic.com/firebasejs/12.16.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore-compat.js"></script>
 
 <script>
 /* ============ ICONOS (SVG inline) ============ */
@@ -174,7 +195,7 @@ const ICONS = {
 };
 
 /* ============ DATOS Y CONSTANTES ============ */
-const DEFAULT_CATEGORIES = ["Clubes", "Selecciones", "Retro", "Entrenamiento", "Chándal", "Woman", "Niños", "Accesorios"];
+const DEFAULT_CATEGORIES = ["Clubes", "Selecciones", "NBA", "Retro", "Entrenamiento", "Chándal", "Woman", "Niños", "Accesorios"];
 const PUBLICOS = ["Hombre", "Mujer", "Niño"];
 const SIZES_BY_PUBLICO = {
   "Hombre": ["S", "M", "L", "XL", "XXL", "XXXL"],
@@ -187,6 +208,7 @@ const ALL_VERSIONS = ["Aficionado", "Jugador"];
 const ALL_ESCUDO = ["Pegado", "Bordado"];
 const STORAGE_KEY = "kitverse-data-v4";
 const CART_KEY = "kitverse-cart-v3";
+const CUSTOMER_KEY = "kitverse-customer-v1";
 
 const SIZE_GUIDES = {
   "Hombre": { columns: ["Talla","Altura (cm)","Pecho 1/2 (cm)","Largo (cm)"], rows: [
@@ -221,22 +243,124 @@ function emptyData() {
 function uid() { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36); }
 function esc(s) { return String(s == null ? "" : s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
 
-/* ============ PERSISTENCIA (localStorage) ============ */
-function loadData() {
-  try { const raw = localStorage.getItem(STORAGE_KEY); return raw ? JSON.parse(raw) : emptyData(); }
-  catch (e) { return emptyData(); }
+/* ============ FIREBASE (catálogo compartido) ============ */
+/* 1. Ve a https://console.firebase.google.com → Crear proyecto (gratis)
+   2. Dentro del proyecto: Compilación → Firestore Database → Crear base de datos → modo prueba
+   3. Configuración del proyecto (rueda dentada) → Tus apps → Web (</>) → registra la app
+   4. Copia el objeto firebaseConfig que te da Firebase y pégalo aquí abajo, sustituyendo estos valores: */
+const firebaseConfig = {
+  apiKey: "AIzaSyC7dcnV_41gypRfRdcobogQ6zUiFgqIwtA",
+  authDomain: "kitverse-3cefe.firebaseapp.com",
+  projectId: "kitverse-3cefe",
+  storageBucket: "kitverse-3cefe.firebasestorage.app",
+  messagingSenderId: "702161071775",
+  appId: "1:702161071775:web:3e31ce74b4c8f5cd587caa"
+};
+
+let db = null;
+let itemsRef = null;
+let metaRef = null;
+let customersRef = null;
+let counterRef = null;
+let firebaseReady = false;
+try {
+  if (firebaseConfig.apiKey !== "PEGA_AQUI_TU_API_KEY" && window.firebase) {
+    firebase.initializeApp(firebaseConfig);
+    db = firebase.firestore();
+    itemsRef = db.collection("kitverse_items");   // 1 documento por camiseta (evita el límite de 1MB)
+    metaRef = db.collection("kitverse_meta").doc("config"); // categorías + ajustes
+    customersRef = db.collection("kitverse_customers"); // clientes registrados
+    counterRef = db.collection("kitverse_meta").doc("counters"); // contador de códigos de cliente
+    firebaseReady = true;
+  }
+} catch (e) {
+  console.error("Error iniciando Firebase:", e);
+  firebaseReady = false;
 }
-function saveData(d) {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); return true; } catch (e) { return false; }
-}
+
+/* ============ PERSISTENCIA ============ */
 function loadCart() {
   try { const raw = localStorage.getItem(CART_KEY); return raw ? JSON.parse(raw) : []; } catch (e) { return []; }
 }
 function saveCart(c) { try { localStorage.setItem(CART_KEY, JSON.stringify(c)); } catch (e) {} }
 
+function offlineWarning() {
+  STATE.saveError = "Firebase no está configurado todavía (ver comentario FIREBASE en el código). Los cambios no se compartirán con tus amigos.";
+  render();
+}
+
+function saveItemDoc(item) {
+  if (!firebaseReady) { offlineWarning(); return; }
+  itemsRef.doc(item.id).set(item).then(function () {
+    STATE.saveError = null;
+  }).catch(function (e) {
+    STATE.saveError = "No se pudo guardar la camiseta: " + e.message;
+    render();
+  });
+}
+function deleteItemDoc(id) {
+  if (!firebaseReady) { offlineWarning(); return; }
+  itemsRef.doc(id).delete().catch(function (e) {
+    STATE.saveError = "No se pudo eliminar: " + e.message;
+    render();
+  });
+}
+function saveMeta() {
+  if (!firebaseReady) { offlineWarning(); return; }
+  metaRef.set({ categories: DATA.categories, settings: DATA.settings }).then(function () {
+    STATE.saveError = null;
+  }).catch(function (e) {
+    STATE.saveError = "No se pudo guardar: " + e.message;
+    render();
+  });
+}
+function persistCart() { saveCart(CART); }
+
+/* ============ CLIENTE (registro único por dispositivo) ============ */
+function loadCustomerProfile() {
+  try { const raw = localStorage.getItem(CUSTOMER_KEY); return raw ? JSON.parse(raw) : null; } catch (e) { return null; }
+}
+function saveCustomerProfileLocal(profile) {
+  try { localStorage.setItem(CUSTOMER_KEY, JSON.stringify(profile)); } catch (e) {}
+}
+function clearCustomerProfileLocal() {
+  try { localStorage.removeItem(CUSTOMER_KEY); } catch (e) {}
+}
+
+function registerCustomer(nombre, telefono, direccion, onDone, onError) {
+  if (!firebaseReady) {
+    // Sin Firebase configurado: asigna un código local simple, solo para pruebas
+    const profile = { code: "KV-LOCAL", nombre: nombre, telefono: telefono, direccion: direccion };
+    saveCustomerProfileLocal(profile);
+    onDone(profile);
+    return;
+  }
+  db.runTransaction(function (tx) {
+    return tx.get(counterRef).then(function (doc) {
+      const current = (doc.exists && doc.data().customerSeq) ? doc.data().customerSeq : 0;
+      const next = current + 1;
+      tx.set(counterRef, { customerSeq: next }, { merge: true });
+      return next;
+    });
+  }).then(function (seq) {
+    const code = "KV-" + String(seq).padStart(4, "0");
+    const profile = {
+      code: code, nombre: nombre, telefono: telefono, direccion: direccion,
+      createdAt: new Date().toISOString()
+    };
+    return customersRef.doc(code).set(profile).then(function () { return profile; });
+  }).then(function (profile) {
+    saveCustomerProfileLocal(profile);
+    onDone(profile);
+  }).catch(function (e) {
+    if (onError) onError(e);
+  });
+}
+
 /* ============ ESTADO GLOBAL ============ */
-let DATA = loadData();
+let DATA = emptyData();
 let CART = loadCart();
+let dataLoaded = false;
 let STATE = {
   screen: "catalogo",
   catalogQuery: "",
@@ -250,19 +374,28 @@ let STATE = {
   adminUploading: false,
   confirmDeleteId: null,
   catInput: "",
-  cartContact: { nombre: "", telefono: "" },
+  customerProfile: null,
+  regForm: { nombre: "", telefono: "", direccion: "" },
+  regError: null,
+  regSaving: false,
   cartSent: false,
-  saveError: null
+  saveError: null,
+  customersList: null,
+  customersLoading: false
 };
-
-function persistData() {
-  const ok = saveData(DATA);
-  STATE.saveError = ok ? null : "No se pudo guardar. Comprueba el espacio del navegador.";
-}
-function persistCart() { saveCart(CART); }
+STATE.customerProfile = loadCustomerProfile();
 
 /* ============ UTILIDADES ============ */
 function findItem(id) { return DATA.items.find(function(i){ return i.id === id; }); }
+
+function withSpinner(action) {
+  const spinner = document.getElementById("loading-spinner");
+  if (spinner) spinner.style.display = "flex";
+  setTimeout(function() {
+    action();
+    if (spinner) spinner.style.display = "none";
+  }, 260);
+}
 
 function resizeImageToDataUrl(file, callback) {
   const maxW = 900, quality = 0.72;
@@ -297,6 +430,10 @@ function computeSurcharges(talla, nombre, dorsal, logoManga) {
 /* ============ RENDER: SHELL ============ */
 function render() {
   const app = document.getElementById("app");
+  if (!dataLoaded) {
+    app.innerHTML = renderHeader() + '<div class="empty-msg" style="margin-top:80px;">Cargando catálogo...</div>';
+    return;
+  }
   let html = "";
   html += renderHeader();
   if (STATE.saveError) {
@@ -511,16 +648,45 @@ function buildFullOrderMessage() {
   const header = "Pedido KitVerse";
   const items = CART.map(buildOrderLine).join("\n\n");
   const totalLine = "Total: "+total+"€";
-  const contact = "Datos de contacto:\nNombre: "+(STATE.cartContact.nombre||"-")+"\nTeléfono: "+(STATE.cartContact.telefono||"-");
-  return [header, items, totalLine, contact].join("\n\n");
+  const p = STATE.customerProfile || {};
+  const contactLines = [
+    "Datos de contacto:",
+    "Cliente: " + (p.nombre || "-") + (p.code ? " (" + p.code + ")" : ""),
+    "Teléfono: " + (p.telefono || "-"),
+  ];
+  if (p.direccion) contactLines.push("Dirección: " + p.direccion);
+  return [header, items, totalLine, contactLines.join("\n")].join("\n\n");
+}
+
+function renderRegisterForm() {
+  const f = STATE.regForm;
+  let html = '<div class="content">';
+  html += '<div class="empty-msg" style="margin-top:0;margin-bottom:18px;color:#ffffff;">Antes de tu primer pedido, déjanos tus datos. Solo se piden una vez.</div>';
+  html += '<div class="field"><div class="field-label">Nombre y apellidos</div><input class="text-input" value="'+esc(f.nombre)+'" oninput="onRegInput(this,\'nombre\')" placeholder="Ej. Ana Pérez"/></div>';
+  html += '<div class="field"><div class="field-label">Teléfono</div><input class="text-input" inputmode="tel" value="'+esc(f.telefono)+'" oninput="onRegInput(this,\'telefono\')" placeholder="Ej. 600111222"/></div>';
+  html += '<div class="field"><div class="field-label">Dirección (opcional)</div><input class="text-input" value="'+esc(f.direccion)+'" oninput="onRegInput(this,\'direccion\')" placeholder="Calle, número, ciudad"/></div>';
+  if (STATE.regError) html += '<div class="error-msg">'+esc(STATE.regError)+'</div>';
+  const canReg = f.nombre.trim() && f.telefono.trim();
+  html += '<button class="btn btn-primary" style="width:100%;padding:13px;margin-top:6px;" '+(canReg && !STATE.regSaving ? '' : 'disabled')+' data-action="submitRegister">'
+    + (STATE.regSaving ? "Guardando..." : "Guardar y continuar") + '</button>';
+  html += '</div>';
+  return html;
 }
 
 function renderCart() {
+  if (!STATE.customerProfile) {
+    return renderRegisterForm();
+  }
   if (CART.length === 0) {
     return '<div class="content"><div class="empty-msg">Tu carrito está vacío. Añade camisetas desde el catálogo.</div></div>';
   }
   const total = CART.reduce(function(sum,l){ return sum + (parseFloat(l.precio)||0); }, 0);
+  const p = STATE.customerProfile;
   let html = '<div class="content with-cart-bar">';
+  html += '<div style="display:flex;justify-content:space-between;align-items:center;background:var(--card);border:1.5px solid rgba(255,255,255,.55);border-radius:12px;padding:10px 14px;margin-bottom:16px;">'
+    + '<div><div style="font-weight:800;font-size:13.5px;">'+esc(p.nombre)+'</div><div style="font-size:11.5px;color:#ffffff;">'+esc(p.code||"")+' · '+esc(p.telefono||"")+'</div></div>'
+    + '<span data-action="editProfile" style="font-size:11.5px;color:#7FB8FF;font-weight:700;cursor:pointer;text-decoration:underline;">Editar</span>'
+    + '</div>';
   CART.forEach(function(l){
     html += '<div class="cart-line">'
       + '<div class="cart-line-top"><div><div class="name">'+esc(l.equipo)+'</div><div class="meta">'+esc(l.modelo||"")+(l.temporada?' · '+esc(l.temporada):'')+'</div></div>'
@@ -530,28 +696,40 @@ function renderCart() {
       + '</div>';
   });
   html += '<div class="cart-total"><span class="lbl">TOTAL</span><span class="val">'+total+'€</span></div>';
-  html += '<div class="field"><div class="field-label">Tu nombre</div><input class="text-input" placeholder="Nombre y apellidos" value="'+esc(STATE.cartContact.nombre)+'" oninput="onCartContactInput(this,\'nombre\')"/></div>';
-  html += '<div class="field"><div class="field-label">Tu teléfono</div><input class="text-input" inputmode="tel" placeholder="Ej. 600111222" value="'+esc(STATE.cartContact.telefono)+'" oninput="onCartContactInput(this,\'telefono\')"/></div>';
   html += '<div class="cart-note">Pedido bajo encargo. Pago por adelantado (Bizum o efectivo). Entrega en 15-20 días.</div>';
   html += '</div>';
-  const canSend = CART.length > 0 && STATE.cartContact.nombre.trim() && STATE.cartContact.telefono.trim();
-  html += '<div class="sticky-bottom" style="bottom:60px;"><button class="btn btn-whatsapp" id="send-order-btn" '+(canSend?'':'disabled')+' data-action="sendOrder">'
+  html += '<div class="sticky-bottom" style="bottom:60px;"><button class="btn btn-whatsapp" id="send-order-btn" data-action="sendOrder">'
     + (STATE.cartSent ? ICONS.check(19)+' Pedido enviado' : ICONS.messageCircle+' Enviar pedido por WhatsApp') + '</button></div>';
   return html;
 }
 
-function onCartContactInput(el, field) {
-  STATE.cartContact[field] = el.value;
-  const btn = document.getElementById("send-order-btn");
-  if (btn) {
-    const canSend = CART.length > 0 && STATE.cartContact.nombre.trim() && STATE.cartContact.telefono.trim();
-    btn.disabled = !canSend;
-  }
+function onRegInput(el, field) { STATE.regForm[field] = el.value; }
+
+function submitRegister() {
+  const f = STATE.regForm;
+  if (!f.nombre.trim() || !f.telefono.trim()) return;
+  STATE.regSaving = true; STATE.regError = null;
+  render();
+  registerCustomer(f.nombre.trim(), f.telefono.trim(), f.direccion.trim(), function (profile) {
+    STATE.customerProfile = profile;
+    STATE.regSaving = false;
+    render();
+  }, function (e) {
+    STATE.regSaving = false;
+    STATE.regError = "No se pudo registrar: " + e.message;
+    render();
+  });
+}
+
+function editProfile() {
+  const p = STATE.customerProfile || {};
+  STATE.regForm = { nombre: p.nombre || "", telefono: p.telefono || "", direccion: p.direccion || "" };
+  STATE.customerProfile = null;
+  render();
 }
 
 function sendOrder() {
-  const canSend = CART.length > 0 && STATE.cartContact.nombre.trim() && STATE.cartContact.telefono.trim();
-  if (!canSend) return;
+  if (CART.length === 0 || !STATE.customerProfile) return;
   const text = encodeURIComponent(buildFullOrderMessage());
   const phone = (DATA.settings.whatsapp || "").replace(/[^\d]/g, "");
   const url = phone ? ("https://wa.me/"+phone+"?text="+text) : ("https://wa.me/?text="+text);
@@ -564,15 +742,16 @@ function sendOrder() {
 /* ============ RENDER: ADMIN ============ */
 function renderAdmin() {
   if (!STATE.adminUnlocked) return renderAdminGate();
-  let html = '<div style="display:flex;gap:8px;padding:16px 16px 0;">';
-  var tabs = ["prendas","categorias","ajustes"];
-  var labels = { prendas: "Prendas", categorias: "Categorías", ajustes: "Ajustes" };
+  let html = '<div style="display:flex;gap:8px;padding:16px 16px 0;overflow-x:auto;">';
+  var tabs = ["prendas","categorias","clientes","ajustes"];
+  var labels = { prendas: "Prendas", categorias: "Categorías", clientes: "Clientes", ajustes: "Ajustes" };
   tabs.forEach(function(t){
     html += '<button class="chip '+(STATE.adminTab===t?"active":"")+'" data-action="adminTab" data-tab="'+t+'">'+labels[t]+'</button>';
   });
   html += '</div>';
   if (STATE.adminTab === "prendas") html += renderAdminPrendas();
   else if (STATE.adminTab === "categorias") html += renderAdminCategorias();
+  else if (STATE.adminTab === "clientes") html += renderAdminClientes();
   else html += renderAdminAjustes();
   return html;
 }
@@ -612,10 +791,13 @@ function renderAdminPrendas() {
   } else {
     html += '<div style="display:flex;flex-direction:column;gap:10px;">';
     DATA.items.forEach(function(it){
-      html += '<button class="prenda-row" data-action="editItem" data-id="'+esc(it.id)+'">'
+      html += '<div class="prenda-row" style="padding:10px;">'
+        + '<button data-action="editItem" data-id="'+esc(it.id)+'" style="display:flex;align-items:center;gap:12px;flex:1;background:none;border:none;text-align:left;cursor:pointer;padding:0;min-width:0;">'
         + '<div class="thumb">'+(it.foto?'<img src="'+it.foto+'"/>':ICONS.shirt(20,'#33436e'))+'</div>'
-        + '<div class="info"><div class="name">'+esc(it.equipo)+'</div><div class="meta">'+esc(it.modelo||"")+(it.temporada?' · '+esc(it.temporada):'')+(it.precio?' · '+esc(it.precio)+'€':'')+'</div></div>'
-        + ICONS.chevronRight + '</button>';
+        + '<div class="info" style="min-width:0;"><div class="name">'+esc(it.equipo)+'</div><div class="meta">'+esc(it.modelo||"")+(it.temporada?' · '+esc(it.temporada):'')+(it.precio?' · '+esc(it.precio)+'€':'')+'</div></div>'
+        + ICONS.chevronRight + '</button>'
+        + '<span data-action="requestDeleteItem" data-id="'+esc(it.id)+'" style="flex-shrink:0;padding:6px 4px 6px 12px;cursor:pointer;">'+ICONS.trash()+'</span>'
+        + '</div>';
     });
     html += '</div>';
   }
@@ -655,15 +837,16 @@ function saveItemForm() {
   const exists = DATA.items.some(function(i){ return i.id === f.id; });
   if (exists) DATA.items = DATA.items.map(function(i){ return i.id === f.id ? f : i; });
   else DATA.items.push(f);
-  persistData();
+  saveItemDoc(f);
   STATE.adminEditing = null; STATE.adminForm = null;
   render();
 }
 function requestDeleteItem(id) { STATE.confirmDeleteId = id; render(); }
 function cancelDelete() { STATE.confirmDeleteId = null; render(); }
 function confirmDelete() {
-  DATA.items = DATA.items.filter(function(i){ return i.id !== STATE.confirmDeleteId; });
-  persistData();
+  const idToDelete = STATE.confirmDeleteId;
+  DATA.items = DATA.items.filter(function(i){ return i.id !== idToDelete; });
+  deleteItemDoc(idToDelete);
   STATE.confirmDeleteId = null; STATE.adminEditing = null; STATE.adminForm = null;
   render();
 }
@@ -671,7 +854,11 @@ function confirmDelete() {
 function renderItemForm() {
   const f = STATE.adminForm;
   const isEdit = STATE.adminEditing !== "new";
-  let html = '<div class="content">';
+  let html = '<div class="detail-topbar" style="border-bottom:1.5px solid rgba(255,255,255,.55);">'
+    + '<button data-action="cancelItemForm">'+ICONS.arrowLeft+'</button>'
+    + '<div class="detail-title">'+(isEdit ? "Editar camiseta" : "Nueva camiseta")+'</div>'
+    + '</div>';
+  html += '<div class="content" style="padding-bottom:120px;">';
   html += '<div class="field"><div class="field-label">Foto</div>';
   html += '<div class="photo-box" id="admin-photo-box">' + renderAdminPhotoBox() + '</div>';
   html += '<label class="upload-label">'+ICONS.imagePlus(17)+' Subir foto (cámara o galería)<input type="file" accept="image/*" onchange="handleAdminFileChange(event)"/></label>';
@@ -707,7 +894,7 @@ function renderItemForm() {
 
   html += '</div>';
 
-  html += '<div class="sticky-bottom" style="display:flex;gap:10px;">';
+  html += '<div class="sticky-bottom" style="display:flex;gap:10px;bottom:60px;z-index:25;">';
   if (isEdit) html += '<button class="btn btn-danger-outline" style="padding:0 18px;" data-action="requestDeleteItem" data-id="'+esc(f.id)+'">'+ICONS.trash()+'</button>';
   html += '<button class="btn btn-secondary" style="flex:1;padding:13px;" data-action="cancelItemForm">Cancelar</button>';
   html += '<button class="btn btn-primary" style="flex:2;padding:13px;" '+(f.equipo.trim()?"":"disabled")+' data-action="saveItemForm">Guardar</button>';
@@ -765,6 +952,47 @@ function adminToggleVersion(value) {
   render();
 }
 
+function loadCustomersList() {
+  if (!firebaseReady) { STATE.customersList = []; render(); return; }
+  STATE.customersLoading = true;
+  render();
+  customersRef.orderBy("code").get().then(function (snap) {
+    STATE.customersList = snap.docs.map(function (d) { return d.data(); });
+    STATE.customersLoading = false;
+    render();
+  }).catch(function (e) {
+    STATE.customersList = [];
+    STATE.customersLoading = false;
+    STATE.saveError = "No se pudo cargar clientes: " + e.message;
+    render();
+  });
+}
+
+function renderAdminClientes() {
+  let html = '<div class="content">';
+  html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">'
+    + '<div style="font-size:12px;color:#ffffff;font-weight:700;text-transform:uppercase;">'+(STATE.customersList ? STATE.customersList.length : 0)+' clientes registrados</div>'
+    + '<button data-action="refreshClientes" style="background:none;border:1.5px solid rgba(255,255,255,.55);color:#fff;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:700;">Actualizar</button>'
+    + '</div>';
+
+  if (STATE.customersLoading) {
+    html += '<div class="empty-msg" style="margin-top:40px;">Cargando clientes...</div>';
+  } else if (!STATE.customersList || STATE.customersList.length === 0) {
+    html += '<div class="empty-msg" style="margin-top:40px;">Todavía no hay clientes registrados.</div>';
+  } else {
+    html += '<div style="display:flex;flex-direction:column;gap:10px;">';
+    STATE.customersList.forEach(function (c) {
+      html += '<div class="prenda-row" style="padding:12px;">'
+        + '<div class="info"><div class="name">'+esc(c.nombre)+' <span style="color:#7FB8FF;font-weight:700;">· '+esc(c.code)+'</span></div>'
+        + '<div class="meta">' + esc(c.telefono || "") + (c.direccion ? " · " + esc(c.direccion) : "") + '</div></div>'
+        + '</div>';
+    });
+    html += '</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
 function renderAdminCategorias() {
   let html = '<div class="content">';
   html += '<div style="display:flex;gap:8px;margin-bottom:16px;"><input class="text-input" id="new-cat-input" placeholder="Nueva categoría" value="'+esc(STATE.catInput)+'" oninput="STATE.catInput=this.value" onkeydown="if(event.key===\'Enter\')addCategory()"/>';
@@ -781,14 +1009,14 @@ function addCategory() {
   const v = (input ? input.value : STATE.catInput).trim();
   if (v && DATA.categories.indexOf(v) === -1) {
     DATA.categories.push(v);
-    persistData();
+    saveMeta();
   }
   STATE.catInput = "";
   render();
 }
 function removeCategory(v) {
   DATA.categories = DATA.categories.filter(function(c){ return c !== v; });
-  persistData();
+  saveMeta();
   render();
 }
 
@@ -804,7 +1032,7 @@ function renderAdminAjustes() {
 function onSettingsInput(el, field) { DATA.settings[field] = el.value; }
 function saveSettings() {
   if (!DATA.settings.adminPass) DATA.settings.adminPass = "kitverse";
-  persistData();
+  saveMeta();
   const btn = document.getElementById("save-settings-btn");
   if (btn) {
     btn.textContent = "Guardado ✓";
@@ -817,7 +1045,7 @@ document.addEventListener("click", function(e) {
   const el = e.target.closest("[data-action]");
   if (!el) return;
   const action = el.getAttribute("data-action");
-  if (action === "nav") { STATE.screen = el.getAttribute("data-screen"); render(); }
+  if (action === "nav") { withSpinner(function(){ STATE.screen = el.getAttribute("data-screen"); render(); }); }
   else if (action === "setCat") {
     STATE.catalogCat = el.getAttribute("data-cat");
     let chipsHtml = '<button class="chip '+(STATE.catalogCat==="Todos"?"active":"")+'" data-action="setCat" data-cat="Todos">Todos</button>';
@@ -825,19 +1053,26 @@ document.addEventListener("click", function(e) {
     document.getElementById("catalog-chips").innerHTML = chipsHtml;
     document.getElementById("catalog-results").innerHTML = renderCatalogResults();
   }
-  else if (action === "openItem") openItem(el.getAttribute("data-id"));
-  else if (action === "closeItem") closeItem();
+  else if (action === "openItem") { const id = el.getAttribute("data-id"); withSpinner(function(){ openItem(id); }); }
+  else if (action === "closeItem") { withSpinner(function(){ closeItem(); }); }
   else if (action === "setDetailField") { STATE.detail[el.getAttribute("data-field")] = el.getAttribute("data-value"); render(); }
   else if (action === "showGuide") { STATE.detail.showGuide = true; render(); }
   else if (action === "closeGuide") { STATE.detail.showGuide = false; render(); }
   else if (action === "addToCart") addToCart();
   else if (action === "removeLine") { CART = CART.filter(function(l){ return l.lineId !== el.getAttribute("data-id"); }); persistCart(); render(); }
   else if (action === "sendOrder") sendOrder();
-  else if (action === "adminTab") { STATE.adminTab = el.getAttribute("data-tab"); render(); }
+  else if (action === "submitRegister") submitRegister();
+  else if (action === "editProfile") editProfile();
+  else if (action === "adminTab") {
+    STATE.adminTab = el.getAttribute("data-tab");
+    render();
+    if (STATE.adminTab === "clientes") loadCustomersList();
+  }
+  else if (action === "refreshClientes") loadCustomersList();
   else if (action === "submitAdminPass") submitAdminPass();
-  else if (action === "newItem") newItem();
-  else if (action === "editItem") editItem(el.getAttribute("data-id"));
-  else if (action === "cancelItemForm") cancelItemForm();
+  else if (action === "newItem") { withSpinner(function(){ newItem(); }); }
+  else if (action === "editItem") { const id = el.getAttribute("data-id"); withSpinner(function(){ editItem(id); }); }
+  else if (action === "cancelItemForm") { withSpinner(function(){ cancelItemForm(); }); }
   else if (action === "saveItemForm") saveItemForm();
   else if (action === "requestDeleteItem") requestDeleteItem(el.getAttribute("data-id"));
   else if (action === "cancelDelete") cancelDelete();
@@ -860,7 +1095,77 @@ document.addEventListener("input", function(e) {
 });
 
 /* ============ INICIO ============ */
-render();
+function bootstrap() {
+  if (!firebaseReady) {
+    DATA = emptyData();
+    dataLoaded = true;
+    STATE.saveError = "Firebase no está configurado. Esto es una vista de PRUEBA local: tus amigos no verán estos cambios hasta que completes la configuración (ver comentario FIREBASE en el código).";
+    render();
+    return;
+  }
+
+  let itemsLoaded = false, metaLoaded = false;
+  function maybeFirstRender() {
+    if (itemsLoaded && metaLoaded && !dataLoaded) {
+      dataLoaded = true;
+      render();
+    } else if (dataLoaded) {
+      render();
+    }
+  }
+
+  itemsRef.get().then(function (snap) {
+    if (snap.empty) {
+      // Primera vez: sembramos el catálogo de ejemplo, un documento por camiseta
+      const batch = db.batch();
+      DEMO_ITEMS.forEach(function (it) { batch.set(itemsRef.doc(it.id), it); });
+      batch.commit();
+      DATA.items = DEMO_ITEMS.slice();
+    } else {
+      DATA.items = snap.docs.map(function (d) { return d.data(); });
+    }
+    itemsLoaded = true;
+    maybeFirstRender();
+
+    itemsRef.onSnapshot(function (snap2) {
+      DATA.items = snap2.docs.map(function (d) { return d.data(); });
+      maybeFirstRender();
+    });
+  }).catch(function (e) {
+    itemsLoaded = true;
+    STATE.saveError = "No se pudo conectar con Firebase (camisetas): " + e.message;
+    maybeFirstRender();
+  });
+
+  metaRef.get().then(function (doc) {
+    if (doc.exists) {
+      const d = doc.data();
+      DATA.categories = d.categories || DEFAULT_CATEGORIES.slice();
+      DATA.settings = d.settings || { whatsapp: "", adminPass: "kitverse" };
+    } else {
+      DATA.categories = DEFAULT_CATEGORIES.slice();
+      DATA.settings = { whatsapp: "", adminPass: "kitverse" };
+      metaRef.set({ categories: DATA.categories, settings: DATA.settings });
+    }
+    metaLoaded = true;
+    maybeFirstRender();
+
+    metaRef.onSnapshot(function (doc2) {
+      if (doc2.exists) {
+        const d = doc2.data();
+        DATA.categories = d.categories || DATA.categories;
+        DATA.settings = d.settings || DATA.settings;
+        maybeFirstRender();
+      }
+    });
+  }).catch(function (e) {
+    metaLoaded = true;
+    STATE.saveError = "No se pudo conectar con Firebase (ajustes): " + e.message;
+    maybeFirstRender();
+  });
+}
+
+bootstrap();
 </script>
 </body>
 </html>
